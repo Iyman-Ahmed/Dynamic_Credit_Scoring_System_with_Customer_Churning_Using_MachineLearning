@@ -7,6 +7,7 @@ This project develops a machine learning solution to predict customer churn for 
 ## **Key Features**
 - **Churn Prediction**: Uses the **XGBoost** algorithm to predict the likelihood of a customer leaving the credit card services.
 - **Credit Scoring System**: Maps churn probabilities to a credit scoring range (300–850), similar to standard credit scoring systems (e.g., FICO).
+- **High Accuracy**: The model achieves an impressive **98.9% accuracy**, ensuring reliable predictions.
 - **Class Imbalance Handling**: Tackles the 16.07% churn rate imbalance using XGBoost's `scale_pos_weight` parameter.
 - **Interpretability**: Outputs churn probabilities, predicted class labels, and credit scores for each customer.
 
@@ -19,6 +20,7 @@ This project develops a machine learning solution to predict customer churn for 
 2. **Model Training**:
     - Trained an XGBoost model with the objective `binary:logistic` to predict churn probabilities.
     - Used `scale_pos_weight` to address class imbalance.
+    - Achieved **98.9% accuracy** on the test set.
 
 3. **Credit Scoring**:
     - Mapped churn probabilities to a custom credit scoring range (300–850).
@@ -48,6 +50,7 @@ The dataset used in this project includes information about customer demographic
     - Objective: `binary:logistic`
     - Class Imbalance Handling: `scale_pos_weight`
     - Trained on preprocessed data to predict churn probabilities.
+    - Achieved **98.9% accuracy** on the test set.
 
 ### **3. Credit Scoring**
 - Churn probabilities are mapped to credit scores using the formula:

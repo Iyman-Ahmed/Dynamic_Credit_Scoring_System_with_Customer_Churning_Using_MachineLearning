@@ -1,108 +1,94 @@
-# -*- coding: utf-8 -*-
-"""app.ipynb
+"""Reproducible customer attrition experiment. No creditworthiness inference."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
 
-**Import Lib and Data**
-
-"""
-
-import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
 import numpy as np
-
-data = pd.read_csv('/path/to/dataset.csv')
-
-data.head()
-
-"""# **Data PreProcessing**"""
-
-data.info()
-
-data = data.drop(columns=['CLIENTNUM','Naive_Bayes_Classifier_Attrition_Flag_Card_Category_Contacts_Count_12_mon_Dependent_count_Education_Level_Months_Inactive_12_mon_1','Naive_Bayes_Classifier_Attrition_Flag_Card_Category_Contacts_Count_12_mon_Dependent_count_Education_Level_Months_Inactive_12_mon_2'])
-data.describe()
-
-data.isnull().sum()
-
-data.duplicated().sum()
-
-sns.boxplot(data = data['Customer_Age'])
-count = (data['Customer_Age'] >65).sum()
-print(count)
-
-sns.boxplot(data = data['Income_Category'])
-
-count = data['Attrition_Flag'].value_counts()
-
-plt.bar(count.index, count.values)
-plt.xlabel('Attrition Flag')
-plt.ylabel('Count')
-plt.title('Attrition Flag Distribution')
-plt.show()
-count2 = data['Gender'].value_counts()
-
-plt.bar(count2.index, count2.values)
-plt.xlabel('Gender')
-plt.ylabel('Count')
-plt.title('Gender Distribution')
-plt.show()
-
-from sklearn.preprocessing import LabelEncoder
-from sklearn.preprocessing import OneHotEncoder
-encoder = LabelEncoder()
-onehot = OneHotEncoder()
-
-columns = ['Attrition_Flag','Income_Category','Card_Category','Gender']
-for col in columns:
-  data[col] = encoder.fit_transform(data[col])
-
-data = pd.get_dummies(data,columns=['Education_Level','Marital_Status'], drop_first=True).astype(int)
-
-
-
-data.head()
-
-data['Avg_Trans_value'] = data['Total_Trans_Amt']/data['Total_Trans_Ct']
-data['Total_Chng_Q4_Q1'] = (data['Total_Amt_Chng_Q4_Q1']+ data['Total_Ct_Chng_Q4_Q1'])/2
-data.replace([float('inf'), float('-inf')], 0, inplace=True)
-data.fillna(0, inplace=True)
-data.head()
-
+import pandas as pd
+from sklearn.compose import ColumnTransformer, make_column_selector
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import (average_precision_score, brier_score_loss, classification_report,
+                             confusion_matrix, f1_score, roc_auc_score)
 from sklearn.model_selection import train_test_split
-X = data.drop(columns=['Attrition_Flag'])
-y = data['Attrition_Flag']
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
-
-y
-
-"""# **ML Model Training**"""
-
-from sklearn.metrics import classification_report, roc_auc_score
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
 
-scale_pos_weight = y_train.value_counts()[0] / y_train.value_counts()[1]
+TARGET = {"Existing Customer": 0, "Attrited Customer": 1}
 
-"""***XGBoost Model***"""
 
-xgbmodel = XGBClassifier(scale_pos_weight=scale_pos_weight, random_state=42)
-xgbmodel.fit(X_train, y_train)
-xgb_pred = xgbmodel.predict(X_test)
-xgb_preds_proba = xgbmodel.predict_proba(X_test)
-churn_probabilities = xgb_preds_proba[:, 1]
+def prepare(data):
+    y = data["Attrition_Flag"].map(TARGET)
+    if y.isna().any():
+        raise ValueError("Missing or unknown attrition label")
+    excluded = [c for c in data if c.startswith("Naive_Bayes_") or c in
+                ("CLIENTNUM", "Attrition_Flag")]
+    X = data.drop(columns=excluded).copy()
+    X["Avg_Trans_value"] = X.Total_Trans_Amt / X.Total_Trans_Ct.replace(0, np.nan)
+    X["Total_Chng_Q4_Q1"] = (X.Total_Amt_Chng_Q4_Q1 + X.Total_Ct_Chng_Q4_Q1) / 2
+    return X.replace([np.inf, -np.inf], np.nan), y.astype(int)
 
-print('XGB Classification Report:')
-print(classification_report(y_test, xgb_pred))
-print('XGB AUC Score:', roc_auc_score(y_test, churn_probabilities))
-print(xgb_preds_proba)
 
-def probability_to_score(probability, min_score=300, max_score=850):
-        return min_score + (max_score - min_score) * (1 - probability)
-credit_scores = [probability_to_score(prob) for prob in churn_probabilities]
+def split(X, y):
+    train, test = train_test_split(X.index, test_size=.2, stratify=y, random_state=42)
+    train, validation = train_test_split(train, test_size=.25, stratify=y.loc[train], random_state=43)
+    return train, validation, test
 
-result_df = X_test.copy()
-result_df['Churn_Probability'] = churn_probabilities
-result_df['Credit_Score'] = credit_scores
-result_df['Actual_Churn'] = y_test
-result_df.head()
 
+def build_model(y_train):
+    categorical = Pipeline([("impute", SimpleImputer(strategy="most_frequent")),
+                            ("encode", OneHotEncoder(handle_unknown="ignore", sparse_output=False))])
+    preprocess = ColumnTransformer([
+        ("numeric", SimpleImputer(strategy="median"), make_column_selector(dtype_include=np.number)),
+        ("categorical", categorical, make_column_selector(dtype_exclude=np.number))])
+    return Pipeline([("preprocess", preprocess), ("model", XGBClassifier(
+        n_estimators=100, max_depth=6, learning_rate=.1, n_jobs=2, random_state=42,
+        scale_pos_weight=float((y_train == 0).sum() / (y_train == 1).sum()),
+        eval_metric="logloss"))])
+
+
+def churn_probability(model, X):
+    column = list(model.classes_).index(1)
+    return model.predict_proba(X)[:, column]
+
+
+def run(dataset, output):
+    X, y = prepare(pd.read_csv(dataset))
+    train, validation, test = split(X, y)
+    model = build_model(y.loc[train]).fit(X.loc[train], y.loc[train])
+    vp = churn_probability(model, X.loc[validation])
+    thresholds = np.linspace(.05, .95, 91)
+    threshold = float(max(thresholds, key=lambda t: f1_score(y.loc[validation], vp >= t)))
+    p = churn_probability(model, X.loc[test])
+    predictions = p >= threshold
+    report = {
+        "dataset_sha256": hashlib.sha256(Path(dataset).read_bytes()).hexdigest(),
+        "positive_class": "Attrited Customer = 1", "seed_train_test": 42, "seed_train_validation": 43,
+        "split_sizes": {"train": len(train), "validation": len(validation), "test": len(test)},
+        "threshold_selected_on_validation_f1": threshold,
+        "validation_f1": float(f1_score(y.loc[validation], vp >= threshold)),
+        "test": {"average_precision": float(average_precision_score(y.loc[test], p)),
+                 "roc_auc": float(roc_auc_score(y.loc[test], p)),
+                 "brier_score": float(brier_score_loss(y.loc[test], p)),
+                 "confusion_matrix_labels_0_1": confusion_matrix(y.loc[test], predictions).tolist(),
+                 "classification_report": classification_report(y.loc[test], predictions, output_dict=True)},
+        "baseline": {"majority_accuracy": float((y.loc[test] == 0).mean()),
+                     "constant_score_average_precision": float(y.loc[test].mean())},
+        "limitations": ["Single random split of a public dataset; not external validation.",
+                        "Weighted model probabilities are not calibrated churn rates.",
+                        "No default/repayment labels: no credit score or creditworthiness claim."]}
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "evaluation.json").write_text(json.dumps(report, indent=2) + "\n")
+    pd.DataFrame({"row_index": test, "actual_churn": y.loc[test].to_numpy(),
+                  "churn_model_probability": p, "predicted_churn": predictions.astype(int)}).to_csv(
+                      output / "predictions.csv", index=False)
+    print(json.dumps(report, indent=2))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data", type=Path, default=Path(__file__).with_name("BankChurners.csv"))
+    parser.add_argument("--output", type=Path, default=Path(__file__).with_name("results"))
+    args = parser.parse_args()
+    run(args.data, args.output)
